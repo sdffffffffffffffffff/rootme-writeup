@@ -1,0 +1,197 @@
+# DSA challenge exploit
+
+There’s a subtle but devastating bug in verify:
+
+- They check ranges with “or” instead of “and”, so signatures with s2=0 aren’t rejected immediately.
+- modinv returns False (not an exception) when no inverse exists (e.g., s2=0). In Python, False behaves like 0 in arithmetic.
+- That makes w = False → w = 0, so u1 = u2 = 0, and v = (g^0 · y^0 mod p) mod q = 1. The code then checks v == s1, so choosing s1 = 1 makes any message verify.
+- Therefore, the universal valid signature is: "1:0".
+
+So you can get the flag by sending option 3 and providing the signature “1:0”.
+
+---
+
+## Minimal attack in one line
+
+- Enter this as the “secret signature” for the target message:
+  - 1:0
+
+---
+
+## Python exploit script
+
+```python
+#!/usr/bin/env python3
+import socket  # EN: For TCP connections.  FR: Pour les connexions TCP.
+import sys     # EN: For command-line args.   FR: Pour les arguments en ligne de commande.
+import time    # EN: For small waits between reads/writes.  FR: Pour de petites pauses entre lectures/écritures.
+
+HOST = "challenge01.root-me.org"  # EN: Challenge host.  FR: Hôte du challenge.
+PORT = 51068                      # EN: Challenge port.  FR: Port du challenge.
+
+# EN: The forged signature that always verifies due to the bug (s1=1, s2=0).
+# FR: La signature forgée qui passe toujours à cause du bug (s1=1, s2=0).
+FORGED_SIG = "1:0"
+
+def recv_until(sock, markers, timeout=2.0):
+    """
+    EN: Read from the socket until one of the markers appears or timeout.
+    FR: Lit depuis le socket jusqu’à ce qu’un des marqueurs apparaisse ou expiration.
+    """
+    sock.setblocking(False)
+    data = b""
+    start = time.time()
+    while time.time() - start < timeout:
+        try:
+            chunk = sock.recv(4096)
+            if chunk:
+                data += chunk
+                text = data.decode(errors="ignore")
+                if any(m in text for m in markers):
+                    return text
+            else:
+                time.sleep(0.05)
+        except BlockingIOError:
+            time.sleep(0.05)
+    return data.decode(errors="ignore")
+
+def send_line(sock, line):
+    """
+    EN: Send a line terminated by newline.
+    FR: Envoie une ligne terminée par un saut de ligne.
+    """
+    sock.sendall((line + "\n").encode())
+
+def main():
+    """
+    EN: Connect and exploit by submitting the universal signature "1:0".
+    FR: Se connecter et exploiter en soumettant la signature universelle "1:0".
+    """
+    with socket.create_connection((HOST, PORT), timeout=5) as s:
+        # EN: Read the banner/public key dump and first menu.
+        # FR: Lire la bannière/clé publique et le premier menu.
+        print(recv_until(s, ["Menu:", "Choose an option:"]))
+
+        # EN: Choose option 3: Get the flag.
+        # FR: Choisir l’option 3 : Obtenir le flag.
+        send_line(s, "3")
+        print(recv_until(s, ["Enter the secret signature:"], timeout=2.0))
+
+        # EN: Provide the forged signature (s1=1, s2=0).
+        # FR: Fournir la signature forgée (s1=1, s2=0).
+        send_line(s, FORGED_SIG)
+
+        # EN: Read the server response (should contain the flag).
+        # FR: Lire la réponse du serveur (devrait contenir le flag).
+        resp = recv_until(s, ["flag", "Flag", "invalid", "Invalid", "get out", "Well played"], timeout=2.0)
+        print(resp)
+
+if __name__ == "__main__":
+    # EN: Allow overriding host/port from CLI, if needed.
+    # FR: Permettre de surcharger l’hôte/port via la ligne de commande, si besoin.
+    if len(sys.argv) >= 2:
+        HOST = sys.argv[1]
+    if len(sys.argv) >= 3:
+        PORT = int(sys.argv[2])
+    main()
+```
+
+---
+
+
+- import socket
+  - EN: We need raw TCP to talk to the challenge service.
+  - FR: On utilise du TCP brut pour communiquer avec le service du challenge.
+
+- import sys
+  - EN: To optionally override host/port via command line.
+  - FR: Pour éventuellement changer l’hôte/le port en ligne de commande.
+
+- import time
+  - EN: To throttle reads and implement simple timeouts.
+  - FR: Pour temporiser les lectures et gérer des délais simples.
+
+- HOST = "challenge01.root-me.org"
+  - EN: Remote host of the challenge.
+  - FR: Hôte distant du challenge.
+
+- PORT = 51068
+  - EN: Remote port of the challenge.
+  - FR: Port distant du challenge.
+
+- FORGED_SIG = "1:0"
+  - EN: The universally valid signature due to the verification bug.
+  - FR: La signature universelle valide à cause du bug de vérification.
+
+- def recv_until(sock, markers, timeout=2.0):
+  - EN: Helper to read until we see a prompt or timeout fires.
+  - FR: Aide pour lire jusqu’à un prompt ou une échéance de temps.
+
+- sock.setblocking(False)
+  - EN: Switch to non-blocking mode for polling-style reads.
+  - FR: Passe en mode non bloquant pour des lectures de type sondage.
+
+- data = b""; start = time.time()
+  - EN: Buffer and start time for timeout control.
+  - FR: Tampon et heure de départ pour gérer le délai.
+
+- loop with recv, check any(m in text for m in markers)
+  - EN: Accumulate data until one of the expected prompts is found.
+  - FR: Accumule les données jusqu’à trouver l’un des prompts attendus.
+
+- return data.decode(...)
+  - EN: On timeout, return whatever we collected.
+  - FR: En cas d’expiration, renvoyer ce qui a été collecté.
+
+- def send_line(sock, line):
+  - EN: Utility to send a text line with newline.
+  - FR: Utilitaire pour envoyer une ligne de texte avec un saut de ligne.
+
+- def main():
+  - EN: Orchestrates the connection and exploit steps.
+  - FR: Orchestre la connexion et les étapes de l’exploit.
+
+- with socket.create_connection((HOST, PORT), timeout=5) as s:
+  - EN: Connect to the challenge server.
+  - FR: Se connecte au serveur du challenge.
+
+- print(recv_until(s, ["Menu:", "Choose an option:"]))
+  - EN: Read and display the initial banner and menu.
+  - FR: Lit et affiche la bannière et le menu initiaux.
+
+- send_line(s, "3")
+  - EN: Select “Get the flag”.
+  - FR: Sélectionne “Obtenir le flag”.
+
+- print(recv_until(s, ["Enter the secret signature:"], timeout=2.0))
+  - EN: Wait for the prompt asking for the signature.
+  - FR: Attend le prompt demandant la signature.
+
+- send_line(s, FORGED_SIG)
+  - EN: Submit the forged signature "1:0".
+  - FR: Soumet la signature forgée "1:0".
+
+- resp = recv_until(s, ["flag", "Flag", "invalid", "Invalid", "get out", "Well played"], timeout=2.0)
+  - EN: Read the server’s response that should include the flag on success.
+  - FR: Lit la réponse du serveur qui devrait inclure le flag en cas de succès.
+
+- print(resp)
+  - EN: Display the response.
+  - FR: Affiche la réponse.
+
+- if __name__ == "__main__": ... main()
+  - EN: Allow overriding host/port then run the exploit.
+  - FR: Permet de surcharger hôte/port puis lance l’exploit.
+
+---
+
+## Why “1:0” works (concise)
+
+- Range check uses “or”, so s2=0 slips through if s1>0.
+- modinv(0, q) returns False (not an exception). In arithmetic, False behaves like 0.
+- Hence w=0, u1=0, u2=0, v=(g^0·y^0 mod p) mod q = 1.
+- The verifier checks v == s1, so s1 must be 1. Any message verifies with signature “1:0”.
+
+Correct fix in verify:
+- Use “and” for range checks and explicitly reject s1==0 or s2==0.
+- Make modinv raise on failure or explicitly check for 0 before inversion.
