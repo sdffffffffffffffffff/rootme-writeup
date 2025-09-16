@@ -1,0 +1,22 @@
+Identify a good target to jump to
+Pick the simplest valid redirection:
+
+Hidden “win”/“print_flag” function:
+
+bash
+nm -C ./ch15 | grep -Ei 'win|flag|secret'
+objdump -d ./ch15 | less
+Use the function’s start address.
+
+Or call system("/bin/sh") via PLT (ret2libc style):
+
+bash
+objdump -d ./ch15 | grep system@plt
+strings -tx ./ch15 | grep '/bin/sh'
+If no “/bin/sh” in binary, you can:
+
+Use libc addresses when ASLR is off (LD_PRELOAD or local libc), or
+
+Place “/bin/sh” on the stack and pass its pointer as the first argument.
+
+If there’s a function that prints the flag (no args), that’s the easiest.
