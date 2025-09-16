@@ -1,0 +1,338 @@
+Awesome! Let’s dive deeper into how the fault injection leaks the private key in this ElGamal ECC setup. I’ll walk you through the math, the logic, and how to implement the matching process to recover each bit of the key.
+
+---
+
+## 🔁 Recap: What Happens During Decryption
+
+In ElGamal ECC, the ciphertext is a pair of points \((C_1, C_2)\), and decryption is:
+
+\[
+M = C_2 - a \cdot C_1
+\]
+
+Where:
+- \(a\) is the private key (a scalar).
+- \(C_1 = k \cdot P\), \(C_2 = k \cdot Q + M\), with \(Q = a \cdot P\).
+
+Now, if a fault is injected, the decryption uses a corrupted key \(a' = a \oplus 2^i\), flipping one bit of \(a\). The decrypted message becomes:
+
+\[
+M' = C_2 - a' \cdot C_1 = C_2 - (a \oplus 2^i) \cdot C_1
+\]
+
+So the difference between the correct and faulted decryption is:
+
+\[
+\Delta = M' - M = -((a \oplus 2^i) - a) \cdot C_1
+\]
+
+This simplifies to:
+
+- If bit \(i\) was 0: \(a' = a + 2^i\) → \(\Delta = -2^i \cdot C_1\)
+- If bit \(i\) was 1: \(a' = a - 2^i\) → \(\Delta = +2^i \cdot C_1\)
+
+---
+
+## 🧮 Matching Logic: How to Identify the Bit
+
+To recover the bit:
+1. **Compute** \(\Delta = M' - M\)
+2. **Precompute** a table of \(2^j \cdot C_1\) for \(j = 0\) to \(255\)
+3. **Compare** \(\Delta\) to each entry in the table and its negation:
+   - If \(\Delta = +2^j \cdot C_1\), then bit \(j\) was originally 1
+   - If \(\Delta = -2^j \cdot C_1\), then bit \(j\) was originally 0
+
+This works because scalar multiplication on elliptic curves is deterministic and linear.
+
+---
+
+## 🧑‍💻 Implementation Tips
+
+Here’s how to do it efficiently:
+
+### 1. Precompute the table:
+```python
+T = []
+Tneg = []
+Pj = C1
+for j in range(256):
+    T.append(Pj)
+    Tneg.append(neg(Pj))
+    Pj = add(Pj, Pj)  # Double each time
+```
+
+### 2. For each faulted decryption:
+```python
+
+
+Delta = sub(M_faulted, M_correct)
+for j in range(256):
+    if point_eq(Delta, T[j]):
+        bits[j] = 1
+        break
+    elif point_eq(Delta, Tneg[j]):
+        bits[j] = 0
+        break
+```
+
+### 3. Reconstruct the key:
+```python
+a_val = sum((bits.get(i, 0) << i) for i in range(256))
+```
+
+---
+
+## 🧠 Why This Is So Powerful
+
+This attack doesn’t require solving the discrete log problem or brute-forcing anything. It exploits the predictability of bit flips and the linearity of ECC operations. Each faulted decryption gives you **one bit** of the key. With enough queries, you get all 256 bits.
+
+
+#!/usr/bin/env python3
+import socket
+import re
+import time
+
+# ---- EC arithmetic for secp256k1 ----
+p = (1 << 256) - (1 << 32) - (1 << 9) - (1 << 8) - (1 << 7) - (1 << 6) - (1 << 4) - 1
+a_curve = 0
+b_curve = 7
+
+def inv_mod(x):
+    return pow(x % p, p - 2, p)
+
+def is_on_curve(P):
+    if P is None:
+        return True
+    x, y = P
+    return (y * y - (x * x * x + b_curve)) % p == 0
+
+def neg(P):
+    if P is None:
+        return None
+    x, y = P
+    return (x % p, (-y) % p)
+
+def add(P, Q):
+    if P is None:
+        return Q
+    if Q is None:
+        return P
+    x1, y1 = P
+    x2, y2 = Q
+    if x1 == x2 and (y1 + y2) % p == 0:
+        return None
+    if P == Q:
+        if y1 == 0:
+            return None
+        m = (3 * x1 * x1 + a_curve) * inv_mod(2 * y1) % p
+    else:
+        if x1 == x2:
+            return None
+        m = (y2 - y1) * inv_mod((x2 - x1) % p) % p
+    x3 = (m * m - x1 - x2) % p
+    y3 = (m * (x1 - x3) - y1) % p
+    return (x3, y3)
+
+def sub(P, Q):
+    return add(P, neg(Q))
+
+def mul(k, P):
+    R = None
+    Q = P
+    kk = k
+    while kk > 0:
+        if kk & 1:
+            R = add(R, Q)
+        Q = add(Q, Q)
+        kk >>= 1
+    return R
+
+# ---- Robust I/O helpers ----
+def set_timeout(sock, secs=8.0):
+    sock.settimeout(secs)
+
+def recv_some(sock, max_bytes=4096):
+    try:
+        data = sock.recv(max_bytes)
+        if data:
+            print(f"[RECV {len(data)} bytes]")
+            try:
+                print(data.decode(errors="ignore"))
+            except Exception:
+                pass
+        return data
+    except socket.timeout:
+        print("[RECV TIMEOUT]")
+        return b""
+
+def recv_until_any(sock, needles):
+    """
+    Read until one of the needles (list of bytes) appears.
+    Returns the full buffer (including whatever content we saw).
+    """
+    buf = b""
+    while True:
+        for nd in needles:
+            if nd in buf:
+                return buf
+        chunk = recv_some(sock)
+        if not chunk:
+            # One more chance
+            time.sleep(0.2)
+            chunk = recv_some(sock)
+            if not chunk:
+                print(f"[ERROR] recv_until_any: none of {[n.decode('ascii','ignore') for n in needles]} seen")
+                return buf
+        buf += chunk
+
+def recv_until(sock, needle: bytes):
+    return recv_until_any(sock, [needle])
+
+def sendline(sock, line: str):
+    print(f"[SEND] {line}")
+    sock.sendall(line.encode() + b"\n")
+
+# Parsing
+pt_re = re.compile(rb"X=([0-9]+)\s*Y=([0-9]+)")
+ciph_re = re.compile(rb"C1=\(([-0-9]+),\s*([-0-9]+)\)\s*C2=\(([-0-9]+),\s*([-0-9]+)\)")
+
+def parse_point_block(data: bytes):
+    m = pt_re.search(data)
+    if not m:
+        print("[PARSE-ERR] Point block not found")
+        return None
+    x = int(m.group(1)); y = int(m.group(2))
+    P = (x % p, y % p)
+    print(f"[PARSE] Point: {P}")
+    return P
+
+def parse_cipher_block(data: bytes):
+    m = ciph_re.search(data)
+    if not m:
+        print("[PARSE-ERR] Cipher block not found")
+        return None
+    x1 = int(m.group(1)); y1 = int(m.group(2))
+    x2 = int(m.group(3)); y2 = int(m.group(4))
+    C1 = (x1 % p, y1 % p)
+    C2 = (x2 % p, y2 % p)
+    print(f"[PARSE] C1: {C1}\n[PARSE] C2: {C2}")
+    return C1, C2
+
+def point_eq(P, Q):
+    if P is None or Q is None:
+        return P is None and Q is None
+    return (P[0] == Q[0]) and (P[1] == Q[1])
+
+def match_delta(Delta, T, Tneg):
+    for j in range(256):
+        if point_eq(Delta, T[j]):
+            return (j, 1)
+        if point_eq(Delta, Tneg[j]):
+            return (j, 0)
+    return None
+
+# ---- Exploit flow ----
+HOST = "challenge01.root-me.org"
+PORT = 51069
+
+def main():
+    print("[INFO] Connecting...")
+    s = socket.create_connection((HOST, PORT))
+    set_timeout(s, 8.0)
+
+    # Initial banner + curve + menu
+    recv_until(s, b"Menu")
+
+    # (1) Encrypt once to get (C1, C2)
+    sendline(s, "1")
+    recv_until(s, b"Plaintext")
+    sendline(s, "hello")
+    enc_block = recv_until_any(s, [b"[+] Menu:", b"$>"])
+    pts = parse_cipher_block(enc_block)
+    if not pts:
+        print("[FATAL] Could not parse ciphertext from encryption step.")
+        return
+    C1, C2 = pts
+    if not is_on_curve(C1) or not is_on_curve(C2):
+        print("[FATAL] C1 or C2 not on curve")
+        return
+
+    # (2) Clean decryption (synchronize strictly with prompt)
+    sendline(s, "2")
+    recv_until(s, b"Ciphertext [(x1,y1);(x2,y2)]:")
+    sendline(s, f"[({C1[0]},{C1[1]});({C2[0]},{C2[1]})]")
+    # Read until we see the next menu; allow partials and then finish
+    block = recv_until_any(s, [b"Decrypted:", b"[+] Menu:", b"$>"])
+    if b"[+] Menu:" not in block:
+        block += recv_until(s, b"[+] Menu:")
+    print("[DEBUG] Clean decryption block captured.")
+    M0 = parse_point_block(block)
+    if not M0 or not is_on_curve(M0):
+        print("[FATAL] Could not parse clean decrypted point.")
+        try:
+            print(block.decode(errors="ignore"))
+        except Exception:
+            pass
+        return
+    print(f"[INFO] M0 = {M0}")
+
+    # Precompute 2^j * C1 and negatives
+    print("[INFO] Precomputing 2^j * C1...")
+    T = []
+    Tneg = []
+    Pj = C1
+    for j in range(256):
+        T.append(Pj)
+        Tneg.append(neg(Pj))
+        Pj = add(Pj, Pj)
+
+    bits = {}
+    iterations = 0
+    print("[INFO] Starting fault loop...")
+    while len(bits) < 256:
+        iterations += 1
+        sendline(s, "3")
+        recv_until(s, b"Ciphertext [(x1,y1);(x2,y2)]:")
+        sendline(s, f"[({C1[0]},{C1[1]});({C2[0]},{C2[1]})]")
+
+        block = recv_until_any(s, [b"Decrypted:", b"[+] Menu:", b"$>"])
+        if b"[+] Menu:" not in block:
+            block += recv_until(s, b"[+] Menu:")
+
+        Mf = parse_point_block(block)
+        if not Mf or not is_on_curve(Mf):
+            print(f"[WARN] Iter {iterations}: Invalid faulted point; continuing")
+            continue
+
+        Delta = sub(Mf, M0)
+        m = match_delta(Delta, T, Tneg)
+        if not m:
+            print(f"[WARN] Iter {iterations}: Delta unmatched; continuing")
+            continue
+
+        j, bit = m
+        if j not in bits:
+            bits[j] = bit
+            print(f"[FOUND] Bit {j} = {bit}  (recovered {len(bits)}/256)")
+
+    # Reconstruct and submit key
+    a_val = 0
+    for i in range(256):
+        a_val |= (bits.get(i, 0) << i)
+    print(f"[INFO] Reconstructed key a = {a_val}")
+
+    sendline(s, "4")
+    recv_until(s, b"Key (int):")
+    sendline(s, str(a_val))
+    final_resp = recv_until_any(s, [b"Quitting", b"flag", b"Invalid Key"])
+    print("[RESULT] Final server response:")
+    try:
+        print(final_resp.decode(errors="ignore"))
+    except Exception:
+        pass
+    s.close()
+
+if __name__ == "__main__":
+    main()
+
+
